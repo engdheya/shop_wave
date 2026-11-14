@@ -1,4 +1,4 @@
-import 'package:e_commerce_app_with_provider/providers/navigation_provider.dart';
+import 'package:shop_wave/providers/navigation_provider.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/product_provider.dart';

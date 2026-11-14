@@ -13,7 +13,7 @@ class AppLocalizations {
 
   static final Map<String, Map<String, String>> _localizedValues = {
     'en': {
-      'app_title': 'ShopWave',
+      'app_title': 'Shop Wave',
       'account_settings': 'Account Settings',
       'my_orders': 'My Orders',
       'shipping_address': 'Shipping Address',
