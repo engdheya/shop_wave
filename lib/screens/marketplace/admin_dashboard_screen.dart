@@ -54,7 +54,7 @@ class _AdminOverview extends StatelessWidget {
                   MarketplacePageTitle(
                     title: marketText(context, 'Platform overview', 'نظرة عامة على المنصة'),
                     subtitle: marketText(context, 'A central view of independent sellers, stores, catalog activity and orders.', 'إشراف مركزي على البائعين والمتاجر والكتالوج والطلبات.'),
-                    trailing: StatusPill(label: marketText(context, 'Admin preview', 'معاينة المدير'), color: const Color(0xFF4779B6)),
+                    trailing: StatusPill(label: marketText(context, 'Platform admin', 'مدير المنصة'), color: const Color(0xFF4779B6)),
                   ),
                   Container(
                     padding: const EdgeInsets.all(18),
@@ -194,8 +194,12 @@ class _ApplicationCard extends StatelessWidget {
     );
   }
 
-  void _decide(BuildContext context, MarketplaceProvider market, {required bool approve}) {
-    final changed = market.reviewSellerApplication(application.id, approve: approve);
+  Future<void> _decide(BuildContext context, MarketplaceProvider market, {required bool approve}) async {
+    final changed = await market.reviewSellerApplicationRemote(
+      application.id,
+      approve: approve,
+    );
+    if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(changed
           ? approve
@@ -278,7 +282,10 @@ class _StoreModerationTile extends StatelessWidget {
           const SizedBox(width: 6),
           IconButton(
             tooltip: store.status == StoreStatus.suspended ? marketText(context, 'Reactivate store', 'إعادة تفعيل المتجر') : marketText(context, 'Suspend store', 'إيقاف المتجر'),
-            onPressed: () => market.setStoreSuspended(store.id, suspended: store.status != StoreStatus.suspended),
+            onPressed: () async => market.setStoreSuspendedRemote(
+              store.id,
+              suspended: store.status != StoreStatus.suspended,
+            ),
             icon: Icon(store.status == StoreStatus.suspended ? Icons.play_circle_outline_rounded : Icons.pause_circle_outline_rounded, color: store.status == StoreStatus.suspended ? marketplaceTeal : marketplaceCoral),
           ),
         ],
@@ -307,7 +314,10 @@ class _ProductModerationTile extends StatelessWidget {
           StatusPill(label: product.isActive ? marketText(context, 'Visible', 'ظاهر') : marketText(context, 'Hidden', 'مخفي'), color: product.isActive ? marketplaceTeal : marketplaceCoral),
           IconButton(
             tooltip: product.isActive ? marketText(context, 'Hide listing', 'إخفاء المنتج') : marketText(context, 'Restore listing', 'إعادة إظهار المنتج'),
-            onPressed: () => market.setProductModeration(product.id, visible: !product.isActive),
+            onPressed: () async => market.setProductModerationRemote(
+              product.id,
+              visible: !product.isActive,
+            ),
             icon: Icon(product.isActive ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 19, color: marketplaceMuted),
           ),
         ],

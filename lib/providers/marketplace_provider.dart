@@ -1,22 +1,57 @@
+import 'dart:async';
+import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 
 import '../models/marketplace_models.dart';
+import '../repositories/firebase_marketplace_repository.dart';
 import '../models/product.dart';
 
 class MarketplaceProvider extends ChangeNotifier {
-  static const String demoCustomerId = 'customer-demo';
-  static const String _sellerId = 'seller-nova';
+  static const String _sampleSellerId = 'seller-nova';
 
-  final List<MarketplaceStore> _stores = _seedStores();
-  final List<Product> _products = _seedProducts();
-  final List<SellerApplication> _applications = _seedApplications();
+  MarketplaceProvider({FirebaseMarketplaceRepository? repository})
+      : _repository = repository {
+    if (_repository == null) {
+      // Kept only for isolated legacy/widget tests. Production constructs this
+      // provider with FirebaseMarketplaceRepository and never loads seed data.
+      _stores.addAll(_seedStores());
+      _products.addAll(_seedProducts());
+      _applications.addAll(_seedApplications());
+    } else {
+      _bindRemoteData();
+    }
+  }
+
+  final FirebaseMarketplaceRepository? _repository;
+  final List<StreamSubscription<dynamic>> _subscriptions = [];
+  int _remoteGeneration = 0;
+  final Map<String, MarketplaceStore> _publicStoreCache = {};
+  final Map<String, MarketplaceStore> _ownedStoreCache = {};
+  final Map<String, MarketplaceStore> _adminStoreCache = {};
+  final Map<String, Product> _publicProductCache = {};
+  final Map<String, Product> _ownedProductCache = {};
+  final Map<String, Product> _adminProductCache = {};
+  List<StoreOrder> _remoteSellerOrders = [];
+  SellerApplication? _ownSellerApplication;
+
+  final List<MarketplaceStore> _stores = [];
+  final List<Product> _products = [];
+  final List<SellerApplication> _applications = [];
   final List<MarketplaceOrder> _orders = [];
   final List<MarketplaceAuditEvent> _auditEvents = [];
   final Set<String> _favoriteIds = {};
   final Map<String, int> _cartQuantities = {};
+  final Random _random = Random.secure();
+  String? _checkoutRequestId;
   final List<String> _comparisonIds = [];
 
   MarketplaceRole _role = MarketplaceRole.customer;
+  String? _activeUserId;
+  String _activeUserName = '';
+  String _activeUserPhone = '';
+  String _sellerId = _sampleSellerId;
+  bool _activeSellerApproved = true;
   String _query = '';
   String? _selectedCategoryId;
   String? _selectedStoreId;
@@ -25,10 +60,20 @@ class MarketplaceProvider extends ChangeNotifier {
   double _maximumPrice = 2000;
   MarketplaceSort _sort = MarketplaceSort.featured;
   int _orderSequence = 0;
-  int _applicationSequence = 0;
   int _productSequence = 0;
 
   MarketplaceRole get role => _role;
+  bool get isAuthenticated => _activeUserId != null;
+  String? get activeUserId => _activeUserId;
+  bool get currentSellerApproved => _activeSellerApproved;
+  SellerApplicationStatus? get currentSellerApplicationStatus {
+    if (_role != MarketplaceRole.seller) return null;
+    if (_repository != null) return _ownSellerApplication?.status;
+    for (final application in _applications) {
+      if (application.sellerId == _sellerId) return application.status;
+    }
+    return null;
+  }
   String get query => _query;
   String? get selectedCategoryId => _selectedCategoryId;
   String? get selectedStoreId => _selectedStoreId;
@@ -36,6 +81,150 @@ class MarketplaceProvider extends ChangeNotifier {
   double get minimumPrice => _minimumPrice;
   double get maximumPrice => _maximumPrice;
   MarketplaceSort get sort => _sort;
+
+  void _bindRemoteData() {
+    final repository = _repository;
+    if (repository == null) return;
+    _remoteGeneration++;
+    for (final subscription in _subscriptions) {
+      subscription.cancel();
+    }
+    _subscriptions.clear();
+    _ownedStoreCache.clear();
+    _adminStoreCache.clear();
+    _ownedProductCache.clear();
+    _adminProductCache.clear();
+    _remoteSellerOrders = [];
+    _ownSellerApplication = null;
+    _orders.clear();
+    _applications.clear();
+    _auditEvents.clear();
+
+    _listen<List<MarketplaceStore>>(repository.watchPublicStores(), (items) {
+      _replaceCache(_publicStoreCache, items, (item) => item.id);
+      _syncStores();
+    });
+    _listen<List<Product>>(repository.watchPublicProducts(), (items) {
+      _replaceCache(_publicProductCache, items, (item) => item.id);
+      _syncProducts();
+    });
+
+    if (_role == MarketplaceRole.seller && _activeUserId != null) {
+      final sellerId = _activeUserId!;
+      _listen<MarketplaceStore?>(repository.watchOwnedStore(sellerId), (store) {
+        _ownedStoreCache.clear();
+        if (store != null) _ownedStoreCache[store.id] = store;
+        _syncStores();
+      });
+      _listen<List<Product>>(repository.watchOwnProducts(sellerId), (items) {
+        _replaceCache(_ownedProductCache, items, (item) => item.id);
+        _syncProducts();
+      });
+      _listen<SellerApplication?>(
+        repository.watchSellerApplication(sellerId),
+        (application) {
+          _ownSellerApplication = application;
+          notifyListeners();
+        },
+      );
+      _listen<List<StoreOrder>>(
+        repository.watchSellerOrders(sellerId),
+        (orders) {
+          _remoteSellerOrders = orders;
+          notifyListeners();
+        },
+      );
+    } else if (_role == MarketplaceRole.admin) {
+      _listen<List<MarketplaceStore>>(repository.watchAdminStores(), (items) {
+        _replaceCache(_adminStoreCache, items, (item) => item.id);
+        _syncStores();
+      });
+      _listen<List<Product>>(repository.watchAdminProducts(), (items) {
+        _replaceCache(_adminProductCache, items, (item) => item.id);
+        _syncProducts();
+      });
+      _listen<List<SellerApplication>>(
+        repository.watchAdminApplications(),
+        (items) {
+          _applications
+            ..clear()
+            ..addAll(items);
+          notifyListeners();
+        },
+      );
+      _listen<List<MarketplaceOrder>>(repository.watchAdminOrders(), (items) {
+        _orders
+          ..clear()
+          ..addAll(items);
+        notifyListeners();
+      });
+      _listen<List<MarketplaceAuditEvent>>(
+        repository.watchAdminAuditEvents(),
+        (items) {
+          _auditEvents
+            ..clear()
+            ..addAll(items);
+          notifyListeners();
+        },
+      );
+    } else if (_role == MarketplaceRole.customer && _activeUserId != null) {
+      _listen<List<MarketplaceOrder>>(
+        repository.watchCustomerOrders(_activeUserId!),
+        (items) {
+          _orders
+            ..clear()
+            ..addAll(items);
+          notifyListeners();
+        },
+      );
+    }
+    _syncStores();
+    _syncProducts();
+  }
+
+  void _listen<T>(Stream<T> stream, void Function(T) onValue) {
+    final generation = _remoteGeneration;
+    _subscriptions.add(stream.listen(
+      (value) {
+        if (generation == _remoteGeneration) onValue(value);
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        if (generation == _remoteGeneration) {
+          debugPrint('Firebase marketplace stream failed: $error');
+        }
+      },
+    ));
+  }
+
+  void _replaceCache<T>(Map<String, T> cache, Iterable<T> values, String Function(T) id) {
+    cache
+      ..clear()
+      ..addEntries(values.map((value) => MapEntry(id(value), value)));
+  }
+
+  void _syncStores() {
+    final merged = <String, MarketplaceStore>{
+      ..._publicStoreCache,
+      ..._ownedStoreCache,
+      ..._adminStoreCache,
+    };
+    _stores
+      ..clear()
+      ..addAll(merged.values);
+    notifyListeners();
+  }
+
+  void _syncProducts() {
+    final merged = <String, Product>{
+      ..._publicProductCache,
+      ..._ownedProductCache,
+      ..._adminProductCache,
+    };
+    _products
+      ..clear()
+      ..addAll(merged.values);
+    notifyListeners();
+  }
 
   List<MarketplaceCategory> get categories => const [
         MarketplaceCategory(
@@ -194,30 +383,51 @@ class MarketplaceProvider extends ChangeNotifier {
   int get cartStoreCount => cartGroups.length;
   double get cartSubtotal => cartLines.fold(0, (total, line) => total + line.total);
 
-  List<MarketplaceOrder> get orders => List.unmodifiable(_orders);
-  List<SellerApplication> get sellerApplications => List.unmodifiable(_applications);
-  List<MarketplaceAuditEvent> get auditEvents =>
-      List.unmodifiable(_auditEvents.reversed);
+  List<MarketplaceOrder> get orders {
+    if (_role == MarketplaceRole.admin) return List.unmodifiable(_orders);
+    final userId = _activeUserId;
+    if (userId == null || _role != MarketplaceRole.customer) return const [];
+    return List.unmodifiable(_orders.where((order) => order.customerId == userId));
+  }
+
+  List<SellerApplication> get sellerApplications => _role == MarketplaceRole.admin
+      ? List.unmodifiable(_applications)
+      : const [];
+  List<MarketplaceAuditEvent> get auditEvents => _role == MarketplaceRole.admin
+      ? List.unmodifiable(_auditEvents.reversed)
+      : const [];
 
   MarketplaceStore? get currentSellerStore {
+    if (_role != MarketplaceRole.seller) return null;
     for (final store in _stores) {
       if (store.sellerId == _sellerId) return store;
     }
     return null;
   }
 
-  List<Product> get currentSellerProducts => _products
-      .where((product) => product.sellerId == _sellerId)
-      .toList(growable: false);
+  List<Product> get currentSellerProducts => _role == MarketplaceRole.seller
+      ? _products
+          .where((product) => product.sellerId == _sellerId)
+          .toList(growable: false)
+      : const [];
 
-  List<StoreOrder> get currentSellerOrders => _orders
-      .expand((order) => order.storeOrders)
-      .where((order) => order.sellerId == _sellerId)
-      .toList(growable: false);
+  List<StoreOrder> get currentSellerOrders => _role != MarketplaceRole.seller
+      ? const []
+      : _repository != null
+          ? List.unmodifiable(_remoteSellerOrders)
+          : _orders
+              .expand((order) => order.storeOrders)
+              .where((order) => order.sellerId == _sellerId)
+              .toList(growable: false);
 
-  List<MarketplaceOrder> get allOrders => List.unmodifiable(_orders);
-  int get pendingApplicationCount =>
-      _applications.where((item) => item.status == SellerApplicationStatus.pending).length;
+  List<MarketplaceOrder> get allOrders => _role == MarketplaceRole.admin
+      ? List.unmodifiable(_orders)
+      : const [];
+  int get pendingApplicationCount => _role == MarketplaceRole.admin
+      ? _applications
+          .where((item) => item.status == SellerApplicationStatus.pending)
+          .length
+      : 0;
   int get activeStoreCount => activeStores.length;
   int get catalogProductCount =>
       _products.where((product) => product.isActive).length;
@@ -227,16 +437,124 @@ class MarketplaceProvider extends ChangeNotifier {
           order.status != StoreOrderStatus.cancelled &&
           order.status != StoreOrderStatus.declined)
       .length;
-  double get demoSalesTotal => _orders
-      .where((order) => order.paymentStatus == PaymentStatus.sandboxApproved)
-      .fold(0, (total, order) => total + order.total);
+  double get demoSalesTotal => _role == MarketplaceRole.admin
+      ? _orders
+          .where((order) => order.paymentStatus == PaymentStatus.sandboxApproved)
+          .fold(0, (total, order) => total + order.total)
+      : 0;
 
-  void setRole(MarketplaceRole value) {
-    if (_role == value) return;
-    _role = value;
+  /// Local seed-data compatibility for tests only; production profiles and
+  /// seller applications are loaded from Firebase streams.
+  void restoreSellerAccounts(Iterable<MarketplaceUser> users) {
+    if (_repository != null) return;
+    for (final user in users) {
+      if (user.role == MarketplaceRole.seller) _ensureSellerStore(user);
+    }
+    notifyListeners();
+  }
+
+  /// Synchronizes local UI capabilities with the verified Firebase profile.
+  /// A null profile represents a browsing-only visitor.
+  void setAuthenticatedUser(MarketplaceUser? user) {
+    final nextUserId = user?.id;
+    final nextRole = user?.role ?? MarketplaceRole.customer;
+    final identityChanged = _activeUserId != nextUserId || _role != nextRole;
+    final nextSellerApproved = user == null ||
+        user.role != MarketplaceRole.seller ||
+        user.sellerApproved;
+    final remoteAccessChanged =
+        identityChanged || _activeSellerApproved != nextSellerApproved;
+    if (_activeUserId != null && identityChanged) {
+      _cartQuantities.clear();
+      _checkoutRequestId = null;
+      _favoriteIds.clear();
+      _comparisonIds.clear();
+      for (final product in _products) {
+        product.isFavorite = false;
+      }
+    }
+
+    _activeUserId = nextUserId;
+    _activeUserName = user?.displayName ?? '';
+    _activeUserPhone = user?.phone ?? '';
+    _role = user?.role ?? MarketplaceRole.customer;
     _selectedStoreId = null;
     _selectedCategoryId = null;
+
+    if (user != null && user.role == MarketplaceRole.seller) {
+      _sellerId = user.id;
+      _activeSellerApproved = user.sellerApproved;
+      if (_repository == null) _ensureSellerStore(user);
+    } else {
+      _sellerId = _sampleSellerId;
+      _activeSellerApproved = true;
+    }
+    if (_repository != null && remoteAccessChanged) _bindRemoteData();
     notifyListeners();
+  }
+
+  void _ensureSellerStore(MarketplaceUser user) {
+    if (_repository != null) return;
+    if (user.storeName.trim().isEmpty) return;
+    final storeId = user.storeId;
+    final storeIndex = _stores.indexWhere((store) => store.id == storeId);
+    final status = user.sellerApproved
+        ? StoreStatus.active
+        : user.sellerApplicationRejected
+            ? StoreStatus.paused
+            : StoreStatus.pending;
+    final store = MarketplaceStore(
+      id: storeId,
+      sellerId: user.id,
+      name: user.storeName,
+      nameAr: user.storeName,
+      description: user.storeDescription,
+      descriptionAr: user.storeDescription,
+      categoryId: user.storeCategoryId,
+      city: user.storeCity,
+      isVerified: user.sellerApproved,
+      status: status,
+    );
+    if (storeIndex < 0) {
+      _stores.add(store);
+    } else {
+      _stores[storeIndex] = _stores[storeIndex].copyWith(
+        name: user.storeName,
+        nameAr: user.storeName,
+        description: user.storeDescription,
+        descriptionAr: user.storeDescription,
+        city: user.storeCity,
+        isVerified: user.sellerApproved,
+        status: status,
+      );
+    }
+
+    final applicationId = 'application-${user.id}';
+    final applicationIndex =
+        _applications.indexWhere((application) => application.id == applicationId);
+    final submittedAt = applicationIndex >= 0
+        ? _applications[applicationIndex].submittedAt
+        : DateTime.now();
+    final application = SellerApplication(
+      id: applicationId,
+      sellerId: user.id,
+      sellerName: user.displayName,
+      storeName: user.storeName,
+      categoryId: user.storeCategoryId,
+      city: user.storeCity,
+      note: user.storeDescription,
+      submittedAt: submittedAt,
+      status: user.sellerApproved
+          ? SellerApplicationStatus.approved
+          : user.sellerApplicationRejected
+              ? SellerApplicationStatus.rejected
+              : SellerApplicationStatus.pending,
+    );
+    if (applicationIndex < 0) {
+      _applications.insert(0, application);
+    } else {
+      _applications[applicationIndex] = application;
+    }
   }
 
   void setQuery(String value) {
@@ -311,7 +629,22 @@ class MarketplaceProvider extends ChangeNotifier {
 
   MarketplaceOrder? orderById(String id) {
     for (final order in _orders) {
-      if (order.id == id) return order;
+      if (order.id != id) continue;
+      if (_role == MarketplaceRole.admin) return order;
+      if (_role == MarketplaceRole.customer &&
+          _activeUserId != null &&
+          order.customerId == _activeUserId) {
+        return order;
+      }
+      if (_role == MarketplaceRole.seller &&
+          order.storeOrders.any((child) => child.sellerId == _sellerId)) {
+        return order.copyWith(
+          storeOrders: order.storeOrders
+              .where((child) => child.sellerId == _sellerId)
+              .toList(growable: false),
+        );
+      }
+      return null;
     }
     return null;
   }
@@ -358,6 +691,7 @@ class MarketplaceProvider extends ChangeNotifier {
       return CartMutationResult.stockLimitReached;
     }
     _cartQuantities[product.id] = quantity + 1;
+    _checkoutRequestId = null;
     notifyListeners();
     return CartMutationResult.success;
   }
@@ -371,23 +705,56 @@ class MarketplaceProvider extends ChangeNotifier {
     if (product == null || !_canBuy(product)) return CartMutationResult.unavailable;
     if (quantity > product.stockQuantity) return CartMutationResult.stockLimitReached;
     _cartQuantities[productId] = quantity;
+    _checkoutRequestId = null;
     notifyListeners();
     return CartMutationResult.success;
   }
 
   void removeFromCart(String productId) {
-    if (_cartQuantities.remove(productId) != null) notifyListeners();
+    if (_cartQuantities.remove(productId) != null) {
+      _checkoutRequestId = null;
+      notifyListeners();
+    }
   }
 
   void clearCart() {
     if (_cartQuantities.isEmpty) return;
     _cartQuantities.clear();
+    _checkoutRequestId = null;
     notifyListeners();
   }
 
+  Future<CheckoutResult> placeOrder(CheckoutDetails details) async {
+    if (_repository == null) return checkoutDemo(details);
+    if (_role != MarketplaceRole.customer || _activeUserId == null) {
+      return const CheckoutResult.failure('Sign in as a customer before checkout.');
+    }
+    if (_cartQuantities.isEmpty) {
+      return const CheckoutResult.failure('Your cart is empty.');
+    }
+    try {
+      _checkoutRequestId ??= _newCheckoutRequestId();
+      final order = await _repository!.placeSandboxOrder(
+        requestId: _checkoutRequestId!,
+        cart: Map<String, int>.from(_cartQuantities),
+        details: details,
+      );
+      _checkoutRequestId = null;
+      _cartQuantities.clear();
+      _recordAudit(_activeUserName, 'Created sandbox order', order.id);
+      notifyListeners();
+      return CheckoutResult.success(order);
+    } catch (error) {
+      debugPrint('Trusted sandbox order creation failed: $error');
+      return const CheckoutResult.failure(
+        'Checkout could not be completed. Check stock and try again.',
+      );
+    }
+  }
+
   CheckoutResult checkoutDemo(CheckoutDetails details) {
-    if (_role != MarketplaceRole.customer) {
-      return const CheckoutResult.failure('Only a customer can place an order.');
+    if (_role != MarketplaceRole.customer || _activeUserId == null) {
+      return const CheckoutResult.failure('Sign in as a customer before checkout.');
     }
     if (_cartQuantities.isEmpty) {
       return const CheckoutResult.failure('Your cart is empty.');
@@ -443,9 +810,13 @@ class MarketplaceProvider extends ChangeNotifier {
 
     final order = MarketplaceOrder(
       id: parentId,
-      customerId: demoCustomerId,
-      customerName: details.customerName.trim(),
-      customerPhone: details.customerPhone.trim(),
+      customerId: _activeUserId!,
+      customerName: details.customerName.trim().isEmpty
+          ? _activeUserName
+          : details.customerName.trim(),
+      customerPhone: details.customerPhone.trim().isEmpty
+          ? _activeUserPhone
+          : details.customerPhone.trim(),
       deliveryAddress: details.deliveryAddress.trim(),
       createdAt: createdAt,
       paymentStatus: PaymentStatus.sandboxApproved,
@@ -461,9 +832,25 @@ class MarketplaceProvider extends ChangeNotifier {
     }
     _orders.insert(0, order);
     _cartQuantities.clear();
-    _recordAudit('Demo customer', 'Created sandbox order', parentId);
+    _recordAudit(_activeUserName, 'Created sandbox order', parentId);
     notifyListeners();
     return CheckoutResult.success(order);
+  }
+
+  Future<bool> cancelStoreOrderRemote(String parentOrderId, String storeOrderId) async {
+    if (_repository == null) return cancelStoreOrder(parentOrderId, storeOrderId);
+    if (_role != MarketplaceRole.customer || _activeUserId == null) return false;
+    try {
+      await _repository!.call('transitionStoreOrder', {
+        'orderId': parentOrderId,
+        'storeOrderId': storeOrderId,
+        'action': 'cancel',
+      });
+      return true;
+    } catch (error) {
+      debugPrint('Trusted order cancellation failed: $error');
+      return false;
+    }
   }
 
   bool cancelStoreOrder(String parentOrderId, String storeOrderId) {
@@ -471,7 +858,7 @@ class MarketplaceProvider extends ChangeNotifier {
     final parentIndex = _orders.indexWhere((order) => order.id == parentOrderId);
     if (parentIndex < 0) return false;
     final parent = _orders[parentIndex];
-    if (parent.customerId != demoCustomerId) return false;
+    if (_activeUserId == null || parent.customerId != _activeUserId) return false;
     final childIndex = parent.storeOrders.indexWhere((order) => order.id == storeOrderId);
     if (childIndex < 0 || !parent.storeOrders[childIndex].canCustomerCancel) {
       return false;
@@ -491,9 +878,25 @@ class MarketplaceProvider extends ChangeNotifier {
     final updatedChildren = List<StoreOrder>.from(parent.storeOrders);
     updatedChildren[childIndex] = child.copyWith(status: StoreOrderStatus.cancelled);
     _orders[parentIndex] = parent.copyWith(storeOrders: updatedChildren);
-    _recordAudit('Demo customer', 'Cancelled store order', storeOrderId);
+    _recordAudit(_activeUserName, 'Cancelled store order', storeOrderId);
     notifyListeners();
     return true;
+  }
+
+  Future<bool> advanceSellerOrderRemote(String parentOrderId, String storeOrderId) async {
+    if (_repository == null) return advanceSellerOrder(parentOrderId, storeOrderId);
+    if (_role != MarketplaceRole.seller) return false;
+    try {
+      await _repository!.call('transitionStoreOrder', {
+        'orderId': parentOrderId,
+        'storeOrderId': storeOrderId,
+        'action': 'advance',
+      });
+      return true;
+    } catch (error) {
+      debugPrint('Trusted seller order update failed: $error');
+      return false;
+    }
   }
 
   bool advanceSellerOrder(String parentOrderId, String storeOrderId) {
@@ -521,6 +924,67 @@ class MarketplaceProvider extends ChangeNotifier {
     _recordAudit(_sellerId, 'Updated order to ${nextStatus.name}', storeOrderId);
     notifyListeners();
     return true;
+  }
+
+  String newProductId() =>
+      _repository?.newProductId() ?? 'seller-product-${_productSequence + 1}';
+
+  Future<bool> saveOwnProduct({
+    String? productId,
+    required String name,
+    required double price,
+    required int stockQuantity,
+    required String categoryId,
+    required String description,
+    required String imageUrl,
+    required bool isActive,
+  }) async {
+    if (_repository == null) {
+      if (productId == null || productById(productId) == null) {
+        return createOwnProduct(
+          name: name,
+          price: price,
+          stockQuantity: stockQuantity,
+          categoryId: categoryId,
+          description: description,
+          imageUrl: imageUrl,
+        );
+      }
+      return updateOwnProduct(
+        productId: productId,
+        name: name,
+        price: price,
+        stockQuantity: stockQuantity,
+        categoryId: categoryId,
+        description: description,
+        imageUrl: imageUrl,
+        isActive: isActive,
+      );
+    }
+    if (_role != MarketplaceRole.seller ||
+        !_activeSellerApproved ||
+        name.trim().isEmpty ||
+        price < 0 ||
+        stockQuantity < 0 ||
+        currentSellerStore == null) {
+      return false;
+    }
+    try {
+      await _repository!.call('saveProduct', {
+        if (productId != null) 'productId': productId,
+        'name': name.trim(),
+        'price': price,
+        'stockQuantity': stockQuantity,
+        'categoryId': categoryId,
+        'description': description.trim(),
+        'imageUrl': imageUrl.trim(),
+        'isActive': isActive && stockQuantity > 0,
+      });
+      return true;
+    } catch (error) {
+      debugPrint('Trusted product save failed: $error');
+      return false;
+    }
   }
 
   bool updateOwnProduct({
@@ -589,8 +1053,8 @@ class MarketplaceProvider extends ChangeNotifier {
         storeName: store.name,
         storeNameAr: store.nameAr,
         sellerId: store.sellerId,
-        sellerName: 'Nova Tech team',
-        sellerNameAr: 'فريق نوفا للتقنية',
+        sellerName: _activeUserName.isEmpty ? 'Store team' : _activeUserName,
+        sellerNameAr: _activeUserName.isEmpty ? 'فريق المتجر' : _activeUserName,
         stockQuantity: stockQuantity,
         isActive: stockQuantity > 0,
       ),
@@ -600,8 +1064,24 @@ class MarketplaceProvider extends ChangeNotifier {
     return true;
   }
 
+  Future<bool> setOwnStoreOpenRemote(bool isOpen) async {
+    if (_repository == null) return setOwnStoreOpen(isOpen);
+    if (_role != MarketplaceRole.seller || (isOpen && !_activeSellerApproved)) {
+      return false;
+    }
+    try {
+      await _repository!.call('setStoreAvailability', {'isOpen': isOpen});
+      return true;
+    } catch (error) {
+      debugPrint('Trusted store availability update failed: $error');
+      return false;
+    }
+  }
+
   bool setOwnStoreOpen(bool isOpen) {
-    if (_role != MarketplaceRole.seller) return false;
+    if (_role != MarketplaceRole.seller || (isOpen && !_activeSellerApproved)) {
+      return false;
+    }
     final index = _stores.indexWhere((store) => store.sellerId == _sellerId);
     if (index < 0) return false;
     _stores[index] = _stores[index].copyWith(
@@ -612,18 +1092,56 @@ class MarketplaceProvider extends ChangeNotifier {
     return true;
   }
 
+  Future<bool> updateOwnStoreRemote({
+    required String name,
+    required String description,
+    required String city,
+    String logoUrl = '',
+    String coverUrl = '',
+  }) async {
+    if (_repository == null) {
+      return updateOwnStore(
+        name: name,
+        description: description,
+        city: city,
+        logoUrl: logoUrl,
+        coverUrl: coverUrl,
+      );
+    }
+    if (_role != MarketplaceRole.seller || name.trim().isEmpty) return false;
+    try {
+      await _repository!.call('updateStoreProfile', {
+        'name': name.trim(),
+        'description': description.trim(),
+        'city': city.trim(),
+        'logoUrl': logoUrl.trim(),
+        'coverUrl': coverUrl.trim(),
+      });
+      return true;
+    } catch (error) {
+      debugPrint('Trusted store profile update failed: $error');
+      return false;
+    }
+  }
+
   bool updateOwnStore({
     required String name,
     required String description,
     required String city,
+    String logoUrl = '',
+    String coverUrl = '',
   }) {
     if (_role != MarketplaceRole.seller || name.trim().isEmpty) return false;
     final index = _stores.indexWhere((store) => store.sellerId == _sellerId);
     if (index < 0) return false;
     _stores[index] = _stores[index].copyWith(
       name: name.trim(),
+      nameAr: name.trim(),
       description: description.trim(),
+      descriptionAr: description.trim(),
       city: city.trim().isEmpty ? _stores[index].city : city.trim(),
+      logoUrl: logoUrl.isEmpty ? _stores[index].logoUrl : logoUrl.trim(),
+      coverUrl: coverUrl.isEmpty ? _stores[index].coverUrl : coverUrl.trim(),
     );
     for (var productIndex = 0; productIndex < _products.length; productIndex++) {
       if (_products[productIndex].storeId == _stores[index].id) {
@@ -638,40 +1156,34 @@ class MarketplaceProvider extends ChangeNotifier {
     return true;
   }
 
-  bool submitSellerApplication({
-    required String sellerName,
-    required String storeName,
-    required String categoryId,
-    required String city,
-    String note = '',
-  }) {
-    if (_role != MarketplaceRole.customer ||
-        sellerName.trim().isEmpty ||
-        storeName.trim().isEmpty) {
+  Future<bool> reviewSellerApplicationRemote(
+    String applicationId, {
+    required bool approve,
+  }) async {
+    if (_repository == null) {
+      return reviewSellerApplication(applicationId, approve: approve);
+    }
+    if (_role != MarketplaceRole.admin) return false;
+    SellerApplication? application;
+    for (final item in _applications) {
+      if (item.id == applicationId) {
+        application = item;
+        break;
+      }
+    }
+    if (application == null || application.status != SellerApplicationStatus.pending) {
       return false;
     }
-    final existing = _applications.any((application) =>
-        application.sellerId == 'applicant-demo' &&
-        application.status == SellerApplicationStatus.pending);
-    if (existing) return false;
-
-    _applicationSequence++;
-    _applications.insert(
-      0,
-      SellerApplication(
-        id: 'application-$_applicationSequence',
-        sellerId: 'applicant-demo',
-        sellerName: sellerName.trim(),
-        storeName: storeName.trim(),
-        categoryId: categoryId,
-        city: city.trim().isEmpty ? 'Aden' : city.trim(),
-        note: note.trim(),
-        submittedAt: DateTime.now(),
-      ),
-    );
-    _recordAudit('Demo customer', 'Submitted seller application', 'application-$_applicationSequence');
-    notifyListeners();
-    return true;
+    try {
+      await _repository!.call('reviewSellerApplication', {
+        'sellerId': application.sellerId,
+        'approve': approve,
+      });
+      return true;
+    } catch (error) {
+      debugPrint('Trusted seller review failed: $error');
+      return false;
+    }
   }
 
   bool reviewSellerApplication(String applicationId, {required bool approve}) {
@@ -687,7 +1199,15 @@ class MarketplaceProvider extends ChangeNotifier {
           : SellerApplicationStatus.rejected,
     );
 
-    if (approve && !_stores.any((store) => store.sellerId == application.sellerId)) {
+    final storeIndex = _stores.indexWhere(
+      (store) => store.sellerId == application.sellerId,
+    );
+    if (storeIndex >= 0) {
+      _stores[storeIndex] = _stores[storeIndex].copyWith(
+        isVerified: approve,
+        status: approve ? StoreStatus.active : StoreStatus.paused,
+      );
+    } else if (approve) {
       _stores.add(
         MarketplaceStore(
           id: 'store-${application.id}',
@@ -706,9 +1226,30 @@ class MarketplaceProvider extends ChangeNotifier {
         ),
       );
     }
+    if (_sellerId == application.sellerId) {
+      _activeSellerApproved = approve;
+    }
     _recordAudit('Platform admin', approve ? 'Approved seller' : 'Rejected seller', applicationId);
     notifyListeners();
     return true;
+  }
+
+  Future<bool> setStoreSuspendedRemote(
+    String storeId, {
+    required bool suspended,
+  }) async {
+    if (_repository == null) return setStoreSuspended(storeId, suspended: suspended);
+    if (_role != MarketplaceRole.admin) return false;
+    try {
+      await _repository!.call('adminSetStoreStatus', {
+        'storeId': storeId,
+        'suspended': suspended,
+      });
+      return true;
+    } catch (error) {
+      debugPrint('Trusted store moderation failed: $error');
+      return false;
+    }
   }
 
   bool setStoreSuspended(String storeId, {required bool suspended}) {
@@ -725,6 +1266,24 @@ class MarketplaceProvider extends ChangeNotifier {
     );
     notifyListeners();
     return true;
+  }
+
+  Future<bool> setProductModerationRemote(
+    String productId, {
+    required bool visible,
+  }) async {
+    if (_repository == null) return setProductModeration(productId, visible: visible);
+    if (_role != MarketplaceRole.admin) return false;
+    try {
+      await _repository!.call('adminSetProductVisibility', {
+        'productId': productId,
+        'visible': visible,
+      });
+      return true;
+    } catch (error) {
+      debugPrint('Trusted product moderation failed: $error');
+      return false;
+    }
   }
 
   bool setProductModeration(String productId, {required bool visible}) {
@@ -748,6 +1307,11 @@ class MarketplaceProvider extends ChangeNotifier {
     return null;
   }
 
+  String _newCheckoutRequestId() => 'sw-${List<int>.generate(
+        48,
+        (_) => _random.nextInt(16),
+      ).map((value) => value.toRadixString(16)).join()}';
+
   void _recordAudit(String actor, String action, String target) {
     _auditEvents.add(
       MarketplaceAuditEvent(
@@ -763,6 +1327,14 @@ class MarketplaceProvider extends ChangeNotifier {
 
   bool _canBuy(Product product) =>
       product.isActive && product.stockQuantity > 0 && _isStoreOpen(product.storeId);
+
+  @override
+  void dispose() {
+    for (final subscription in _subscriptions) {
+      subscription.cancel();
+    }
+    super.dispose();
+  }
 
   static List<MarketplaceStore> _seedStores() => [
         const MarketplaceStore(

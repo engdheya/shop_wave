@@ -6,11 +6,15 @@ import '../../localization/app_localizations.dart';
 import '../../localization/marketplace_copy.dart';
 import '../../models/marketplace_models.dart';
 import '../../providers/language_provider.dart';
+import '../../providers/marketplace_auth_provider.dart';
 import '../../providers/marketplace_provider.dart';
+import '../../repositories/firebase_marketplace_repository.dart';
+import '../../repositories/firebase_storage_repository.dart';
 import '../../theme/marketplace_theme.dart';
 import '../../widgets/marketplace_widgets.dart';
 import 'admin_dashboard_screen.dart';
 import 'customer_discovery_screens.dart';
+import 'marketplace_auth_dialog.dart';
 import 'marketplace_cart_account_screens.dart';
 import 'seller_dashboard_screen.dart';
 
@@ -26,8 +30,14 @@ class _MarketplaceShellState extends State<MarketplaceShell> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<MarketplaceProvider>(
-      builder: (context, market, _) {
+    return Consumer2<MarketplaceProvider, MarketplaceAuthProvider>(
+      builder: (context, market, auth, _) {
+        if (!auth.isInitialized) {
+          return const Scaffold(
+            backgroundColor: marketplaceCanvas,
+            body: Center(child: CircularProgressIndicator(color: marketplaceTeal)),
+          );
+        }
         final destinations = _destinations(context, market.role);
         final selectedIndex = _selectedIndex.clamp(0, destinations.length - 1).toInt();
         final width = MediaQuery.sizeOf(context).width;
@@ -157,43 +167,7 @@ class _MarketplaceShellState extends State<MarketplaceShell> {
         ),
         Padding(
           padding: const EdgeInsetsDirectional.only(end: 12, start: 2),
-          child: PopupMenuButton<MarketplaceRole>(
-            tooltip: marketText(context, 'Switch preview workspace', 'تغيير مساحة المعاينة'),
-            onSelected: (role) => _switchRole(market, role),
-            itemBuilder: (context) => MarketplaceRole.values
-                .map((role) => PopupMenuItem<MarketplaceRole>(
-                      value: role,
-                      child: Row(
-                        children: [
-                          Icon(_roleIcon(role), size: 18, color: market.role == role ? marketplaceTeal : marketplaceMuted),
-                          const SizedBox(width: 9),
-                          Text(roleTitle(context, role)),
-                          if (market.role == role) ...[const Spacer(), const Icon(Icons.check_rounded, size: 17, color: marketplaceTeal)],
-                        ],
-                      ),
-                    ))
-                .toList(),
-            child: wide
-                ? Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
-                    decoration: BoxDecoration(color: const Color(0xFFEAF4F2), borderRadius: BorderRadius.circular(12)),
-                    child: Row(
-                      children: [
-                        Icon(_roleIcon(market.role), color: marketplaceTeal, size: 18),
-                        const SizedBox(width: 7),
-                        Text(roleTitle(context, market.role), style: const TextStyle(color: marketplaceTeal, fontSize: 11, fontWeight: FontWeight.w700)),
-                        const SizedBox(width: 3),
-                        const Icon(Icons.expand_more_rounded, color: marketplaceTeal, size: 17),
-                      ],
-                    ),
-                  )
-                : Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(color: const Color(0xFFEAF4F2), borderRadius: BorderRadius.circular(12)),
-                    child: Icon(_roleIcon(market.role), color: marketplaceTeal, size: 19),
-                  ),
-          ),
+          child: _identityMenu(context, wide),
         ),
       ],
       bottom: wide
@@ -244,7 +218,7 @@ class _MarketplaceShellState extends State<MarketplaceShell> {
         case 3:
           return MarketplaceCartScreen(onOrderPlaced: () => _selectTab(4));
         case 4:
-          return MarketplaceAccountScreen(onSwitchWorkspace: () => _showRolePicker(context));
+          return const MarketplaceAccountScreen();
         default:
           return const SizedBox.shrink();
       }
@@ -277,39 +251,120 @@ class _MarketplaceShellState extends State<MarketplaceShell> {
     await context.read<LanguageProvider>().setLanguage(current == 'ar' ? 'en' : 'ar');
   }
 
-  void _switchRole(MarketplaceProvider market, MarketplaceRole role) {
-    market.setRole(role);
-    setState(() => _selectedIndex = 0);
+  Widget _identityMenu(BuildContext context, bool wide) {
+    final auth = context.watch<MarketplaceAuthProvider>();
+    final user = auth.currentUser;
+    final role = user?.role ?? MarketplaceRole.customer;
+    return PopupMenuButton<String>(
+      tooltip: marketText(context, 'Account and sign in', 'الحساب وتسجيل الدخول'),
+      onSelected: (action) => _handleIdentityAction(context, action),
+      itemBuilder: (menuContext) => [
+        if (user == null) ...[
+          PopupMenuItem(
+            value: 'sign-in',
+            child: _identityMenuItem(Icons.login_rounded, marketText(menuContext, 'Sign in', 'تسجيل الدخول')),
+          ),
+          PopupMenuItem(
+            value: 'register-customer',
+            child: _identityMenuItem(Icons.person_add_alt_1_rounded, marketText(menuContext, 'Create customer account', 'إنشاء حساب عميل')),
+          ),
+          PopupMenuItem(
+            value: 'register-seller',
+            child: _identityMenuItem(Icons.storefront_outlined, marketText(menuContext, 'Open a seller store', 'إنشاء حساب بائع ومتجر')),
+          ),
+        ] else ...[
+          PopupMenuItem<String>(
+            enabled: false,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(user.displayName, style: const TextStyle(color: marketplaceInk, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 2),
+                Text('${roleTitle(menuContext, user.role)} · ${user.username}', style: const TextStyle(color: marketplaceMuted, fontSize: 10)),
+              ],
+            ),
+          ),
+          if (role == MarketplaceRole.customer)
+            PopupMenuItem(
+              value: 'account',
+              child: _identityMenuItem(Icons.person_outline_rounded, marketText(menuContext, 'My account', 'حسابي')),
+            ),
+          PopupMenuItem(
+            value: 'sign-out',
+            child: _identityMenuItem(Icons.logout_rounded, marketText(menuContext, 'Sign out', 'تسجيل الخروج')),
+          ),
+        ],
+      ],
+      child: wide
+          ? Container(
+              constraints: const BoxConstraints(maxWidth: 220),
+              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+              decoration: BoxDecoration(color: const Color(0xFFEAF4F2), borderRadius: BorderRadius.circular(12)),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(_roleIcon(role), color: marketplaceTeal, size: 18),
+                  const SizedBox(width: 7),
+                  Flexible(
+                    child: Text(
+                      user?.displayName ?? marketText(context, 'Sign in', 'دخول'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: marketplaceTeal, fontSize: 11, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                  const SizedBox(width: 3),
+                  const Icon(Icons.expand_more_rounded, color: marketplaceTeal, size: 17),
+                ],
+              ),
+            )
+          : Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(color: const Color(0xFFEAF4F2), borderRadius: BorderRadius.circular(12)),
+              child: Icon(_roleIcon(role), color: marketplaceTeal, size: 19),
+            ),
+    );
   }
 
-  Future<void> _showRolePicker(BuildContext context) async {
-    final market = context.read<MarketplaceProvider>();
-    final role = await showModalBottomSheet<MarketplaceRole>(
-      context: context,
-      backgroundColor: Colors.white,
-      builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(marketText(sheetContext, 'Preview a workspace', 'معاينة مساحة عمل'), style: const TextStyle(color: marketplaceInk, fontSize: 17, fontWeight: FontWeight.w800)),
-              const SizedBox(height: 6),
-              Text(marketText(sheetContext, 'Role switching is for this local prototype only.', 'تبديل الأدوار مخصص للنسخة المحلية فقط.'), style: const TextStyle(color: marketplaceMuted, fontSize: 11)),
-              const SizedBox(height: 10),
-              ...MarketplaceRole.values.map((role) => ListTile(
-                    leading: Icon(_roleIcon(role), color: market.role == role ? marketplaceTeal : marketplaceMuted),
-                    title: Text(roleTitle(sheetContext, role)),
-                    trailing: market.role == role ? const Icon(Icons.check_rounded, color: marketplaceTeal) : null,
-                    onTap: () => Navigator.pop(sheetContext, role),
-                  )),
-            ],
-          ),
-        ),
-      ),
-    );
-    if (!mounted || role == null) return;
-    _switchRole(market, role);
+  Widget _identityMenuItem(IconData icon, String label) => Row(
+        children: [
+          Icon(icon, size: 18, color: marketplaceTeal),
+          const SizedBox(width: 9),
+          Text(label),
+        ],
+      );
+
+  Future<void> _handleIdentityAction(BuildContext context, String action) async {
+    final auth = context.read<MarketplaceAuthProvider>();
+    var success = false;
+    switch (action) {
+      case 'sign-in':
+        success = await showMarketplaceAuthDialog(context);
+        break;
+      case 'register-customer':
+        success = await showMarketplaceAuthDialog(
+          context,
+          startWithRegistration: true,
+          initialRole: MarketplaceRole.customer,
+        );
+        break;
+      case 'register-seller':
+        success = await showMarketplaceAuthDialog(
+          context,
+          startWithRegistration: true,
+          initialRole: MarketplaceRole.seller,
+        );
+        break;
+      case 'account':
+        _selectTab(4);
+        return;
+      case 'sign-out':
+        await auth.signOut();
+        success = true;
+        break;
+    }
+    if (success && mounted) setState(() => _selectedIndex = 0);
   }
 
   void _selectTab(int index) {
@@ -338,7 +393,23 @@ class ShopWaveApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => MarketplaceProvider()),
+        Provider<FirebaseMarketplaceRepository>(
+          create: (_) => FirebaseMarketplaceRepository(),
+        ),
+        Provider<FirebaseStorageRepository>(
+          create: (_) => FirebaseStorageRepository(),
+        ),
+        ChangeNotifierProvider(
+          create: (context) => MarketplaceProvider(
+            repository: context.read<FirebaseMarketplaceRepository>(),
+          ),
+        ),
+        ChangeNotifierProvider(
+          create: (context) => MarketplaceAuthProvider(
+            context.read<MarketplaceProvider>(),
+            repository: context.read<FirebaseMarketplaceRepository>(),
+          ),
+        ),
         ChangeNotifierProvider(create: (_) => LanguageProvider()),
       ],
       child: Consumer<LanguageProvider>(

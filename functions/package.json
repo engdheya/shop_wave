@@ -1,0 +1,21 @@
+{
+  "name": "shop-wave-functions",
+  "private": true,
+  "description": "Trusted Firebase backend for Shop Wave marketplace workflows",
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "lint": "node --check index.js && node --check scripts/provision-admin.js && node --check test/rules.test.js",
+    "test:rules": "node --test test/rules.test.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.6.0",
+    "firebase-functions": "^6.4.0"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.0",
+    "firebase": "^12.9.0"
+  }
+}

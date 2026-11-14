@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../../localization/marketplace_copy.dart';
 import '../../models/marketplace_models.dart';
 import '../../models/product.dart';
 import '../../providers/marketplace_provider.dart';
+import '../../repositories/firebase_storage_repository.dart';
 import '../../widgets/marketplace_widgets.dart';
 
 class SellerWorkspaceScreen extends StatelessWidget {
@@ -59,8 +61,18 @@ class _SellerOverview extends StatelessWidget {
                     title: marketText(context, 'Seller workspace', 'لوحة البائع'),
                     subtitle: marketText(context, 'Manage your own store, catalog, stock and store orders.', 'أدر متجرك وكتالوجك ومخزونك وطلبات متجرك.'),
                     trailing: StatusPill(
-                      label: store == null ? marketText(context, 'No store', 'لا يوجد متجر') : storeStatusTitle(context, store.status),
-                      color: store?.isOpen ?? false ? marketplaceTeal : marketplaceCoral,
+                      label: store == null
+                          ? marketText(context, 'No store', 'لا يوجد متجر')
+                          : market.currentSellerApproved
+                              ? storeStatusTitle(context, store.status)
+                              : market.currentSellerApplicationStatus == SellerApplicationStatus.rejected
+                                  ? marketText(context, 'Application declined', 'تم رفض الطلب')
+                                  : marketText(context, 'Pending approval', 'بانتظار الموافقة'),
+                      color: !market.currentSellerApproved
+                          ? const Color(0xFFB87028)
+                          : store?.isOpen ?? false
+                              ? marketplaceTeal
+                              : marketplaceCoral,
                     ),
                   ),
                   if (store != null)
@@ -171,7 +183,7 @@ class _SellerCatalogScreen extends StatelessWidget {
                 children: [
                   MarketplacePageTitle(
                     title: marketText(context, 'My catalog', 'كتالوجي'),
-                    subtitle: marketText(context, 'Only Nova Tech listings are available to this seller workspace.', 'تقتصر هذه اللوحة على منتجات متجر نوفا للتقنية.'),
+                    subtitle: marketText(context, 'Only products belonging to your store are available in this workspace.', 'تظهر في هذه اللوحة منتجات متجرك فقط.'),
                     trailing: FilledButton.icon(
                       onPressed: () => showDialog<void>(context: context, builder: (_) => const _ProductEditorDialog()),
                       icon: const Icon(Icons.add_rounded, size: 18),
@@ -230,11 +242,15 @@ class _SellerProductTile extends StatelessWidget {
           ),
           IconButton(
             tooltip: product.isActive ? marketText(context, 'Hide product', 'إخفاء المنتج') : marketText(context, 'Show product', 'إظهار المنتج'),
-            onPressed: () {
-              final saved = market.updateOwnProduct(
+            onPressed: () async {
+              final saved = await market.saveOwnProduct(
                 productId: product.id,
+                name: product.name,
                 price: product.price,
                 stockQuantity: product.stockQuantity,
+                categoryId: product.categoryId,
+                description: product.description,
+                imageUrl: product.imageUrl,
                 isActive: !product.isActive && product.stockQuantity > 0,
               );
               if (!saved) {
@@ -268,6 +284,8 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
   late String _categoryId;
   bool _isActive = true;
   String? _error;
+  String? _draftProductId;
+  bool _uploadingImage = false;
 
   @override
   void initState() {
@@ -319,7 +337,43 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
                 const SizedBox(height: 10),
                 TextFormField(controller: _description, maxLines: 2, decoration: InputDecoration(labelText: marketText(context, 'Description', 'الوصف'))),
                 const SizedBox(height: 10),
-                TextFormField(controller: _imageUrl, decoration: InputDecoration(labelText: marketText(context, 'Image URL (optional)', 'رابط الصورة (اختياري)'))),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _imageUrl,
+                        decoration: InputDecoration(labelText: marketText(context, 'Image URL (optional)', 'رابط الصورة (اختياري)')),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      tooltip: marketText(context, 'Upload image to Firebase Storage', 'رفع الصورة إلى Firebase Storage'),
+                      onPressed: _uploadingImage ? null : _uploadImage,
+                      icon: _uploadingImage
+                          ? const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.upload_file_rounded),
+                    ),
+                  ],
+                ),
+                if (_imageUrl.text.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 90,
+                    width: double.infinity,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: Image.network(
+                        _imageUrl.text,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Container(
+                          color: marketplaceCanvas,
+                          alignment: Alignment.center,
+                          child: const Icon(Icons.image_not_supported_outlined),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
                 if (editing)
                   SwitchListTile.adaptive(
                     value: _isActive,
@@ -353,34 +407,70 @@ class _ProductEditorDialogState extends State<_ProductEditorDialog> {
     return number == null || number < 0 ? marketText(context, 'Enter a valid stock quantity.', 'أدخل كمية مخزون صحيحة.') : null;
   }
 
-  void _save() {
+  Future<void> _uploadImage() async {
+    final store = context.read<MarketplaceProvider>().currentSellerStore;
+    if (store == null) {
+      setState(() => _error = marketText(context, 'Your store is not available yet.', 'متجرك غير متاح حالياً.'));
+      return;
+    }
+    setState(() {
+      _uploadingImage = true;
+      _error = null;
+    });
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1800,
+        imageQuality: 86,
+      );
+      if (picked == null) return;
+      final extension = picked.name.split('.').last.toLowerCase();
+      final contentType = switch (extension) {
+        'jpg' || 'jpeg' => 'image/jpeg',
+        'png' => 'image/png',
+        'webp' => 'image/webp',
+        _ => '',
+      };
+      if (contentType.isEmpty) {
+        throw ArgumentError('Choose a JPEG, PNG, or WebP image.');
+      }
+      final url = await context.read<FirebaseStorageRepository>().uploadProductImage(
+        storeId: store.id,
+        fileName: '${DateTime.now().millisecondsSinceEpoch}.$extension',
+        bytes: await picked.readAsBytes(),
+        contentType: contentType,
+      );
+      if (mounted) setState(() => _imageUrl.text = url);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = marketText(context, 'Image upload failed. Check your connection and store approval.', 'تعذر رفع الصورة. تحقق من الاتصال واعتماد المتجر.'));
+      }
+    } finally {
+      if (mounted) setState(() => _uploadingImage = false);
+    }
+  }
+
+  Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
     final market = context.read<MarketplaceProvider>();
     final price = double.parse(_price.text);
     final stock = int.parse(_stock.text);
-    final saved = widget.product == null
-        ? market.createOwnProduct(
-            name: _name.text,
-            price: price,
-            stockQuantity: stock,
-            categoryId: _categoryId,
-            description: _description.text,
-            imageUrl: _imageUrl.text,
-          )
-        : market.updateOwnProduct(
-            productId: widget.product!.id,
-            name: _name.text,
-            price: price,
-            stockQuantity: stock,
-            categoryId: _categoryId,
-            description: _description.text,
-            imageUrl: _imageUrl.text,
-            isActive: _isActive && stock > 0,
-          );
+    final productId = widget.product?.id ?? (_draftProductId ??= market.newProductId());
+    final saved = await market.saveOwnProduct(
+      productId: productId,
+      name: _name.text,
+      price: price,
+      stockQuantity: stock,
+      categoryId: _categoryId,
+      description: _description.text,
+      imageUrl: _imageUrl.text,
+      isActive: _isActive && stock > 0,
+    );
+    if (!mounted) return;
     if (saved) {
       Navigator.pop(context);
     } else {
-      setState(() => _error = marketText(context, 'Could not save this listing. Check your store permissions and values.', 'تعذر حفظ المنتج. تحقق من صلاحية المتجر والقيم المدخلة.'));
+      setState(() => _error = marketText(context, 'Could not save this listing. Check your store approval, permissions, and values.', 'تعذر حفظ المنتج. تحقق من اعتماد المتجر وصلاحية الحساب والقيم المدخلة.'));
     }
   }
 }
@@ -401,7 +491,7 @@ class _SellerOrdersScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  MarketplacePageTitle(title: marketText(context, 'Orders for my store', 'طلبات متجري'), subtitle: marketText(context, 'These are sub-orders routed only to Nova Tech.', 'هذه الطلبات الفرعية تخص متجر نوفا للتقنية فقط.')),
+                  MarketplacePageTitle(title: marketText(context, 'Orders for my store', 'طلبات متجري'), subtitle: marketText(context, 'Only orders routed to your store are shown here.', 'تظهر هنا الطلبات المحولة إلى متجرك فقط.')),
                   if (orders.isEmpty)
                     MarketplaceEmptyState(icon: Icons.receipt_long_outlined, title: marketText(context, 'No store orders yet', 'لا توجد طلبات للمتجر بعد'), description: marketText(context, 'When customers check out items from your store, the store-specific orders will appear here.', 'ستظهر هنا الطلبات الخاصة بمتجرك عندما يشتري العملاء منتجاتك.'))
                   else
@@ -446,8 +536,11 @@ class _SellerOrderCard extends StatelessWidget {
             Align(
               alignment: AlignmentDirectional.centerEnd,
               child: FilledButton.icon(
-                onPressed: () {
-                  final changed = market.advanceSellerOrder(order.parentOrderId, order.id);
+                onPressed: () async {
+                  final changed = await market.advanceSellerOrderRemote(
+                    order.parentOrderId,
+                    order.id,
+                  );
                   if (!changed) {
                     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(marketText(context, 'This order is outside your store.', 'هذا الطلب لا يتبع لمتجرك.'))));
                   }
@@ -529,8 +622,19 @@ class _SellerStoreProfileScreen extends StatelessWidget {
                       activeColor: marketplaceTeal,
                       contentPadding: EdgeInsets.zero,
                       title: Text(marketText(context, 'Accepting new orders', 'استقبال طلبات جديدة'), style: const TextStyle(color: marketplaceInk, fontWeight: FontWeight.w700, fontSize: 13)),
-                      subtitle: Text(store.isOpen ? marketText(context, 'Your active products can be purchased.', 'يمكن شراء المنتجات النشطة.') : marketText(context, 'Your store is hidden from shopping until reopened.', 'متجرك مخفي عن التسوق حتى إعادة فتحه.'), style: const TextStyle(color: marketplaceMuted, fontSize: 10)),
-                      onChanged: (value) => market.setOwnStoreOpen(value),
+                      subtitle: Text(
+                        !market.currentSellerApproved
+                            ? market.currentSellerApplicationStatus == SellerApplicationStatus.rejected
+                                ? marketText(context, 'Your application was declined. Contact marketplace support for next steps.', 'تم رفض الطلب. تواصل مع دعم السوق لمعرفة الخطوات التالية.')
+                                : marketText(context, 'Your store is under admin review and is not listed yet.', 'متجرك قيد مراجعة الإدارة ولم يظهر للعملاء بعد.')
+                            : store.isOpen
+                                ? marketText(context, 'Your active products can be purchased.', 'يمكن شراء المنتجات النشطة.')
+                                : marketText(context, 'Your store is hidden from shopping until reopened.', 'متجرك مخفي عن التسوق حتى إعادة فتحه.'),
+                        style: const TextStyle(color: marketplaceMuted, fontSize: 10),
+                      ),
+                      onChanged: market.currentSellerApproved
+                          ? (value) async => market.setOwnStoreOpenRemote(value)
+                          : null,
                     ),
                   ),
                   const SizedBox(height: 13),
@@ -560,14 +664,70 @@ class _StoreProfileEditorState extends State<_StoreProfileEditor> {
   late final TextEditingController _name = TextEditingController(text: widget.store.name);
   late final TextEditingController _description = TextEditingController(text: widget.store.description);
   late final TextEditingController _city = TextEditingController(text: widget.store.city);
+  late final TextEditingController _logoUrl = TextEditingController(text: widget.store.logoUrl);
+  late final TextEditingController _coverUrl = TextEditingController(text: widget.store.coverUrl);
   String? _error;
+  bool _uploadingLogo = false;
+  bool _uploadingCover = false;
 
   @override
   void dispose() {
     _name.dispose();
     _description.dispose();
     _city.dispose();
+    _logoUrl.dispose();
+    _coverUrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _uploadStorePhoto({required bool isLogo}) async {
+    setState(() {
+      if (isLogo) {
+        _uploadingLogo = true;
+      } else {
+        _uploadingCover = true;
+      }
+      _error = null;
+    });
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        maxWidth: isLogo ? 900 : 1800,
+        imageQuality: 86,
+      );
+      if (picked == null) return;
+      final extension = picked.name.split('.').last.toLowerCase();
+      final contentType = switch (extension) {
+        'jpg' || 'jpeg' => 'image/jpeg',
+        'png' => 'image/png',
+        'webp' => 'image/webp',
+        _ => '',
+      };
+      if (contentType.isEmpty) throw ArgumentError('Unsupported image format.');
+      final url = await context.read<FirebaseStorageRepository>().uploadStoreImage(
+        storeId: widget.store.id,
+        fileName: '${isLogo ? 'logo' : 'cover'}-${DateTime.now().millisecondsSinceEpoch}.$extension',
+        bytes: await picked.readAsBytes(),
+        contentType: contentType,
+      );
+      if (mounted) {
+        setState(() => (isLogo ? _logoUrl : _coverUrl).text = url);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = marketText(context, 'Store image upload failed. Check your connection and approval.', 'تعذر رفع صورة المتجر. تحقق من الاتصال واعتماد المتجر.'));
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          if (isLogo) {
+            _uploadingLogo = false;
+          } else {
+            _uploadingCover = false;
+          }
+        });
+      }
+    }
   }
 
   @override
@@ -585,6 +745,16 @@ class _StoreProfileEditorState extends State<_StoreProfileEditor> {
             TextField(controller: _description, maxLines: 3, decoration: InputDecoration(labelText: marketText(context, 'Description', 'الوصف'))),
             const SizedBox(height: 10),
             TextField(controller: _city, decoration: InputDecoration(labelText: marketText(context, 'City', 'المدينة'))),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(child: TextField(controller: _logoUrl, decoration: InputDecoration(labelText: marketText(context, 'Store logo URL', 'رابط شعار المتجر')))),
+              IconButton(tooltip: marketText(context, 'Upload logo', 'رفع الشعار'), onPressed: _uploadingLogo ? null : () => _uploadStorePhoto(isLogo: true), icon: _uploadingLogo ? const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.upload_rounded)),
+            ]),
+            const SizedBox(height: 5),
+            Row(children: [
+              Expanded(child: TextField(controller: _coverUrl, decoration: InputDecoration(labelText: marketText(context, 'Cover image URL', 'رابط صورة الغلاف')))),
+              IconButton(tooltip: marketText(context, 'Upload cover', 'رفع الغلاف'), onPressed: _uploadingCover ? null : () => _uploadStorePhoto(isLogo: false), icon: _uploadingCover ? const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.upload_rounded)),
+            ]),
             if (_error != null) ...[const SizedBox(height: 7), Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 12))],
           ],
         ),
@@ -592,10 +762,16 @@ class _StoreProfileEditorState extends State<_StoreProfileEditor> {
       actions: [
         TextButton(onPressed: () => Navigator.pop(context), child: Text(marketText(context, 'Cancel', 'إلغاء'))),
         FilledButton(
-          onPressed: () {
-            final saved = context.read<MarketplaceProvider>().updateOwnStore(name: _name.text, description: _description.text, city: _city.text);
+          onPressed: () async {
+            final saved = await context.read<MarketplaceProvider>().updateOwnStoreRemote(
+                  name: _name.text,
+                  description: _description.text,
+                  city: _city.text,
+                  logoUrl: _logoUrl.text,
+                  coverUrl: _coverUrl.text,
+                );
             if (saved) {
-              Navigator.pop(context);
+              if (context.mounted) Navigator.pop(context);
             } else {
               setState(() => _error = marketText(context, 'Only your own store profile can be changed.', 'يمكن تعديل ملف متجرك فقط.'));
             }
