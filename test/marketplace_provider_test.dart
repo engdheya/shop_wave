@@ -5,7 +5,8 @@ import 'package:shop_wave/providers/marketplace_provider.dart';
 void main() {
   group('MarketplaceProvider multi-vendor flows', () {
     test('keeps store context and splits one cart into store sub-orders', () {
-      final market = MarketplaceProvider();
+      final market = MarketplaceProvider()
+        ..setAuthenticatedUser(_customer('customer-checkout'));
       final iphone = market.productById('p-iphone-16-pro')!;
       final headphones = market.productById('p-sonic-headphones')!;
       final galaxy = market.productById('p-galaxy-s25')!;
@@ -32,7 +33,12 @@ void main() {
       expect(novaOrder.lines, hasLength(2));
       expect(novaOrder.lines.every((line) => line.storeId == 'store-nova'), isTrue);
       expect(market.cartItemCount, 0);
+      expect(market.orders.single.customerId, 'customer-checkout');
       expect(market.productById(iphone.id)!.stockQuantity, iphone.stockQuantity - 1);
+
+      market.setAuthenticatedUser(_customer('another-customer'));
+      expect(market.orders, isEmpty);
+      expect(market.orderById(order.id), isNull);
     });
 
     test('allows comparison only within one category and caps the set at four', () {
@@ -84,7 +90,8 @@ void main() {
     });
 
     test('seller updates are limited to that seller’s own catalog', () {
-      final market = MarketplaceProvider()..setRole(MarketplaceRole.seller);
+      final market = MarketplaceProvider()
+        ..setAuthenticatedUser(_seller('seller-nova'));
       final ownProduct = market.productById('p-iphone-16-pro')!;
       final otherSellerProduct = market.productById('p-galaxy-s25')!;
 
@@ -121,11 +128,18 @@ void main() {
 
     test('admin can review seller applications and actions are auditable', () {
       final market = MarketplaceProvider();
-      final application = market.sellerApplications.first;
       final initialStoreCount = market.stores.length;
 
-      expect(market.reviewSellerApplication(application.id, approve: true), isFalse);
-      market.setRole(MarketplaceRole.admin);
+      expect(market.sellerApplications, isEmpty);
+      expect(market.reviewSellerApplication('application-pending', approve: true), isFalse);
+      market.setAuthenticatedUser(const MarketplaceUser(
+        id: 'admin-root',
+        username: 'admin',
+        email: 'admin@shopwave.local',
+        displayName: 'Shop Wave Admin',
+        role: MarketplaceRole.admin,
+      ));
+      final application = market.sellerApplications.first;
       expect(market.reviewSellerApplication(application.id, approve: true), isTrue);
       expect(market.sellerApplications.first.status, SellerApplicationStatus.approved);
       expect(market.stores, hasLength(initialStoreCount + 1));
@@ -134,7 +148,8 @@ void main() {
     });
 
     test('customer can cancel only an eligible store sub-order and inventory is restored', () {
-      final market = MarketplaceProvider();
+      final market = MarketplaceProvider()
+        ..setAuthenticatedUser(_customer('customer-cancel'));
       final iphone = market.productById('p-iphone-16-pro')!;
       final galaxy = market.productById('p-galaxy-s25')!;
       market.addToCart(iphone);
@@ -154,9 +169,29 @@ void main() {
       expect(market.orderById(order.id)!.storeOrders.firstWhere((item) => item.id == adenOrder.id).status, StoreOrderStatus.awaitingSeller);
       expect(market.productById(iphone.id)!.stockQuantity, iphone.stockQuantity);
 
-      market.setRole(MarketplaceRole.seller);
+      market.setAuthenticatedUser(_seller('seller-nova'));
       expect(market.advanceSellerOrder(order.id, novaOrder.id), isFalse);
       expect(market.advanceSellerOrder(order.id, adenOrder.id), isFalse);
     });
   });
 }
+
+MarketplaceUser _customer(String id) => MarketplaceUser(
+      id: id,
+      username: id,
+      email: '$id@example.com',
+      displayName: 'Test customer',
+      phone: '777000000',
+      role: MarketplaceRole.customer,
+    );
+
+MarketplaceUser _seller(String id) => MarketplaceUser(
+      id: id,
+      username: 'nova-seller',
+      email: 'seller@example.com',
+      displayName: 'Nova seller',
+      role: MarketplaceRole.seller,
+      storeName: 'Nova Tech',
+      storeCategoryId: 'smartphones',
+      sellerApproved: true,
+    );

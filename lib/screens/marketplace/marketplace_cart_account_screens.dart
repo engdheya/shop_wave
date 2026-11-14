@@ -4,8 +4,10 @@ import 'package:provider/provider.dart';
 import '../../localization/marketplace_copy.dart';
 import '../../models/marketplace_models.dart';
 import '../../models/product.dart';
+import '../../providers/marketplace_auth_provider.dart';
 import '../../providers/marketplace_provider.dart';
 import '../../widgets/marketplace_widgets.dart';
+import 'marketplace_auth_dialog.dart';
 import 'marketplace_product_detail_screen.dart';
 
 class MarketplaceCartScreen extends StatelessWidget {
@@ -17,6 +19,9 @@ class MarketplaceCartScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<MarketplaceProvider>(
       builder: (context, market, _) {
+        final signedInCustomer =
+            context.watch<MarketplaceAuthProvider>().currentUser?.role ==
+                MarketplaceRole.customer;
         final groups = market.cartGroups;
         return SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
@@ -57,6 +62,7 @@ class MarketplaceCartScreen extends StatelessWidget {
                     const SizedBox(height: 4),
                     _CheckoutSummary(
                       total: market.cartSubtotal,
+                      requiresSignIn: !signedInCustomer,
                       onCheckout: () => _openCheckout(context),
                     ),
                     const SizedBox(height: 13),
@@ -88,9 +94,27 @@ class MarketplaceCartScreen extends StatelessWidget {
   }
 
   Future<void> _openCheckout(BuildContext context) async {
+    final auth = context.read<MarketplaceAuthProvider>();
+    if (!auth.isAuthenticated) {
+      final signedIn = await showMarketplaceAuthDialog(context);
+      if (!context.mounted || !signedIn) return;
+    }
+    final customer = auth.currentUser;
+    if (customer == null || customer.role != MarketplaceRole.customer) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(marketText(context, 'A customer account is required to complete checkout.', 'يلزم تسجيل الدخول بحساب عميل لإتمام الشراء.'))),
+        );
+      }
+      return;
+    }
+
     final result = await showDialog<CheckoutResult>(
       context: context,
-      builder: (_) => const _CheckoutDialog(),
+      builder: (_) => _CheckoutDialog(
+        customerName: customer.displayName,
+        customerPhone: customer.phone,
+      ),
     );
     if (!context.mounted || result == null || !result.isSuccess || result.order == null) return;
 
@@ -272,9 +296,14 @@ class _QuantityControl extends StatelessWidget {
 
 class _CheckoutSummary extends StatelessWidget {
   final double total;
+  final bool requiresSignIn;
   final VoidCallback onCheckout;
 
-  const _CheckoutSummary({required this.total, required this.onCheckout});
+  const _CheckoutSummary({
+    required this.total,
+    required this.requiresSignIn,
+    required this.onCheckout,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -297,8 +326,10 @@ class _CheckoutSummary extends StatelessWidget {
             width: double.infinity,
             child: FilledButton.icon(
               onPressed: onCheckout,
-              icon: const Icon(Icons.arrow_forward_rounded),
-              label: Text(marketText(context, 'Continue to demo checkout', 'متابعة للدفع التجريبي')),
+              icon: Icon(requiresSignIn ? Icons.login_rounded : Icons.arrow_forward_rounded),
+              label: Text(requiresSignIn
+                  ? marketText(context, 'Sign in to continue', 'سجّل الدخول للمتابعة')
+                  : marketText(context, 'Continue to demo checkout', 'متابعة للدفع التجريبي')),
             ),
           ),
         ],
@@ -308,7 +339,13 @@ class _CheckoutSummary extends StatelessWidget {
 }
 
 class _CheckoutDialog extends StatefulWidget {
-  const _CheckoutDialog();
+  final String customerName;
+  final String customerPhone;
+
+  const _CheckoutDialog({
+    required this.customerName,
+    required this.customerPhone,
+  });
 
   @override
   State<_CheckoutDialog> createState() => _CheckoutDialogState();
@@ -316,10 +353,17 @@ class _CheckoutDialog extends StatefulWidget {
 
 class _CheckoutDialogState extends State<_CheckoutDialog> {
   final _formKey = GlobalKey<FormState>();
-  final _nameController = TextEditingController();
-  final _phoneController = TextEditingController();
+  late final TextEditingController _nameController;
+  late final TextEditingController _phoneController;
   final _addressController = TextEditingController();
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(text: widget.customerName);
+    _phoneController = TextEditingController(text: widget.customerPhone);
+  }
 
   @override
   void dispose() {
@@ -401,9 +445,9 @@ class _CheckoutDialogState extends State<_CheckoutDialog> {
     );
   }
 
-  void _placeOrder() {
+  Future<void> _placeOrder() async {
     if (!_formKey.currentState!.validate()) return;
-    final result = context.read<MarketplaceProvider>().checkoutDemo(
+    final result = await context.read<MarketplaceProvider>().placeOrder(
           CheckoutDetails(
             customerName: _nameController.text,
             customerPhone: _phoneController.text,
@@ -472,14 +516,13 @@ class _OrderConfirmationDialog extends StatelessWidget {
 }
 
 class MarketplaceAccountScreen extends StatelessWidget {
-  final VoidCallback onSwitchWorkspace;
-
-  const MarketplaceAccountScreen({super.key, required this.onSwitchWorkspace});
+  const MarketplaceAccountScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<MarketplaceProvider>(
-      builder: (context, market, _) {
+    return Consumer2<MarketplaceProvider, MarketplaceAuthProvider>(
+      builder: (context, market, auth, _) {
+        final user = auth.currentUser;
         return SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 30),
           child: Center(
@@ -490,7 +533,7 @@ class MarketplaceAccountScreen extends StatelessWidget {
                 children: [
                   MarketplacePageTitle(
                     title: marketText(context, 'Your Shop Wave account', 'حسابك في شوب ويف'),
-                    subtitle: marketText(context, 'A customer preview with saved products, order tracking, and a path to become a seller.', 'معاينة العميل: المنتجات المحفوظة ومتابعة الطلبات وإمكانية الانضمام كبائع.'),
+                    subtitle: marketText(context, 'Manage your profile, purchases, and saved products.', 'أدر ملفك الشخصي وطلباتك ومنتجاتك المحفوظة.'),
                   ),
                   Container(
                     padding: const EdgeInsets.all(18),
@@ -504,35 +547,71 @@ class MarketplaceAccountScreen extends StatelessWidget {
                           width: 56,
                           height: 56,
                           decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.15), shape: BoxShape.circle),
-                          child: const Icon(Icons.person_outline_rounded, color: Colors.white, size: 30),
+                          child: Icon(
+                            user == null ? Icons.person_outline_rounded : Icons.verified_user_outlined,
+                            color: Colors.white,
+                            size: 30,
+                          ),
                         ),
                         const SizedBox(width: 13),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(marketText(context, 'Guest customer', 'عميل زائر'), style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w800)),
+                              Text(
+                                user?.displayName ?? marketText(context, 'Browsing as a guest', 'تتصفح كزائر'),
+                                style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w800),
+                              ),
                               const SizedBox(height: 4),
-                              Text(marketText(context, 'Browsing as a demo customer', 'تتصفح الآن بوضع العميل التجريبي'), style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                              Text(
+                                user == null
+                                    ? marketText(context, 'Explore freely. Sign in when you are ready to buy.', 'تصفح بحرية، وسجّل الدخول عندما تريد الشراء.')
+                                    : '${user.email} · @${user.username}',
+                                style: const TextStyle(color: Colors.white70, fontSize: 11),
+                              ),
                             ],
                           ),
                         ),
-                        OutlinedButton.icon(
-                          style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: BorderSide(color: Colors.white.withValues(alpha: 0.55))),
-                          onPressed: onSwitchWorkspace,
-                          icon: const Icon(Icons.swap_horiz_rounded, size: 18),
-                          label: Text(marketText(context, 'Preview roles', 'معاينة الأدوار')),
-                        ),
+                        if (user == null) ...[
+                          OutlinedButton(
+                            style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: BorderSide(color: Colors.white.withValues(alpha: 0.55))),
+                            onPressed: () => showMarketplaceAuthDialog(context),
+                            child: Text(marketText(context, 'Sign in', 'دخول')),
+                          ),
+                          const SizedBox(width: 7),
+                          IconButton(
+                            tooltip: marketText(context, 'Create account', 'إنشاء حساب'),
+                            onPressed: () => showMarketplaceAuthDialog(context, startWithRegistration: true),
+                            icon: const Icon(Icons.person_add_alt_1_rounded, color: Colors.white),
+                          ),
+                        ] else
+                          OutlinedButton.icon(
+                            style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: BorderSide(color: Colors.white.withValues(alpha: 0.55))),
+                            onPressed: () => auth.signOut(),
+                            icon: const Icon(Icons.logout_rounded, size: 17),
+                            label: Text(marketText(context, 'Sign out', 'تسجيل الخروج')),
+                          ),
                       ],
                     ),
                   ),
-                  const SizedBox(height: 14),
-                  _JoinSellerCard(onApply: () => _showSellerApplication(context)),
+                  if (user == null) ...[
+                    const SizedBox(height: 14),
+                    _JoinSellerCard(
+                      onApply: () => showMarketplaceAuthDialog(
+                        context,
+                        startWithRegistration: true,
+                        initialRole: MarketplaceRole.seller,
+                      ),
+                    ),
+                  ] else if (user.role == MarketplaceRole.customer) ...[
+                    const SizedBox(height: 14),
+                    _JoinSellerCard(onApply: () => _showSellerApplication(context)),
+                  ],
                   const SizedBox(height: 26),
                   _AccountSectionTitle(title: marketText(context, 'Your orders', 'طلباتك'), count: market.orders.length),
                   const SizedBox(height: 10),
                   if (market.orders.isEmpty)
-                    _CompactEmpty(text: marketText(context, 'No orders yet. Your order history will appear here.', 'لا توجد طلبات بعد. ستظهر طلباتك هنا بعد الشراء.'))
+                    _CompactEmpty(text: marketText(context, 'No orders yet. Your order history will appear here after checkout.', 'لا توجد طلبات بعد. ستظهر هنا بعد إتمام الشراء.'))
                   else
                     ...market.orders.map((order) => Padding(
                           padding: const EdgeInsets.only(bottom: 12),
@@ -557,7 +636,7 @@ class MarketplaceAccountScreen extends StatelessWidget {
                       children: [
                         const Icon(Icons.info_outline_rounded, color: Color(0xFFB87028), size: 18),
                         const SizedBox(width: 8),
-                        Expanded(child: Text(marketText(context, 'This is a local prototype. Account identity, payment, and permissions must be connected to trusted backend services before production use.', 'هذه نسخة أولية محلية. يجب ربط الهوية والدفع والصلاحيات بخدمات خلفية موثوقة قبل الاستخدام الفعلي.'), style: const TextStyle(color: Color(0xFF725B42), fontSize: 11, height: 1.45))),
+                        Expanded(child: Text(marketText(context, 'This build stores demo accounts on this device. Connect a trusted authentication service and server-side authorization before public production use.', 'يخزن هذا الإصدار الحسابات التجريبية على هذا الجهاز. يلزم ربط مصادقة موثوقة وصلاحيات خادمية قبل النشر الفعلي.'), style: const TextStyle(color: Color(0xFF725B42), fontSize: 11, height: 1.45))),
                       ],
                     ),
                   ),
@@ -577,7 +656,7 @@ class MarketplaceAccountScreen extends StatelessWidget {
     );
     if (!context.mounted || result != true) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(marketText(context, 'Seller application submitted for review.', 'تم إرسال طلب الانضمام للمراجعة.'))),
+      SnackBar(content: Text(marketText(context, 'Your seller workspace is ready. Store visibility starts after admin approval.', 'لوحة البائع جاهزة، ويظهر المتجر للعملاء بعد موافقة الإدارة.'))),
     );
   }
 }
@@ -596,9 +675,9 @@ class _JoinSellerCard extends StatelessWidget {
         children: [
           Container(width: 46, height: 46, decoration: BoxDecoration(color: const Color(0xFFEAF4F2), borderRadius: BorderRadius.circular(14)), child: const Icon(Icons.store_mall_directory_outlined, color: marketplaceTeal)),
           const SizedBox(width: 12),
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(marketText(context, 'Have a store of your own?', 'هل تملك متجراً؟'), style: const TextStyle(color: marketplaceInk, fontWeight: FontWeight.w800, fontSize: 13)), const SizedBox(height: 4), Text(marketText(context, 'Apply to sell and manage your own catalog.', 'قدّم طلباً لإدارة متجرك ومنتجاتك.'), style: const TextStyle(color: marketplaceMuted, fontSize: 11))])),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(marketText(context, 'Have a store of your own?', 'هل تملك متجراً؟'), style: const TextStyle(color: marketplaceInk, fontWeight: FontWeight.w800, fontSize: 13)), const SizedBox(height: 4), Text(marketText(context, 'Create a seller account and manage your own catalog.', 'أنشئ حساب بائع وأدر كتالوج متجرك.'), style: const TextStyle(color: marketplaceMuted, fontSize: 11))])),
           const SizedBox(width: 8),
-          OutlinedButton(onPressed: onApply, child: Text(marketText(context, 'Apply', 'قدّم طلباً'))),
+          OutlinedButton(onPressed: onApply, child: Text(marketText(context, 'Become a seller', 'انضم كبائع'))),
         ],
       ),
     );
@@ -614,27 +693,27 @@ class _SellerApplicationDialog extends StatefulWidget {
 
 class _SellerApplicationDialogState extends State<_SellerApplicationDialog> {
   final _formKey = GlobalKey<FormState>();
-  final _sellerName = TextEditingController();
   final _storeName = TextEditingController();
   final _city = TextEditingController(text: 'Aden');
-  final _note = TextEditingController();
-  String _categoryId = 'home';
+  final _description = TextEditingController();
+  String _categoryId = 'smartphones';
   String? _error;
+  bool _busy = false;
 
   @override
   void dispose() {
-    _sellerName.dispose();
     _storeName.dispose();
     _city.dispose();
-    _note.dispose();
+    _description.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final market = context.read<MarketplaceProvider>();
     return AlertDialog(
       backgroundColor: Colors.white,
-      title: Text(marketText(context, 'Apply to become a seller', 'طلب الانضمام كبائع'), style: const TextStyle(color: marketplaceInk, fontWeight: FontWeight.w800)),
+      title: Text(marketText(context, 'Create your seller store', 'إنشاء متجر البائع'), style: const TextStyle(color: marketplaceInk, fontWeight: FontWeight.w800)),
       content: SizedBox(
         width: 430,
         child: Form(
@@ -643,51 +722,58 @@ class _SellerApplicationDialogState extends State<_SellerApplicationDialog> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                TextFormField(controller: _sellerName, decoration: InputDecoration(labelText: marketText(context, 'Your name', 'اسمك')), validator: _required),
+                TextFormField(controller: _storeName, decoration: InputDecoration(labelText: marketText(context, 'Store name', 'اسم المتجر')), validator: (value) => value == null || value.trim().length < 2 ? marketText(context, 'Enter a valid store name.', 'أدخل اسم متجر صحيحاً.') : null),
                 const SizedBox(height: 10),
-                TextFormField(controller: _storeName, decoration: InputDecoration(labelText: marketText(context, 'Store name', 'اسم المتجر')), validator: _required),
-                const SizedBox(height: 10),
-                TextFormField(controller: _city, decoration: InputDecoration(labelText: marketText(context, 'City', 'المدينة'))),
-                const SizedBox(height: 10),
-                DropdownButtonFormField<String>(
-                  value: _categoryId,
-                  decoration: InputDecoration(labelText: marketText(context, 'Main category', 'الفئة الرئيسية')),
-                  items: context.read<MarketplaceProvider>().categories.map((category) => DropdownMenuItem(value: category.id, child: Text(categoryTitle(context, category)))).toList(),
-                  onChanged: (value) => setState(() => _categoryId = value ?? 'home'),
+                Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: DropdownButtonFormField<String>(
+                        value: _categoryId,
+                        isExpanded: true,
+                        decoration: InputDecoration(labelText: marketText(context, 'Main category', 'الفئة الرئيسية')),
+                        items: market.categories.map((category) => DropdownMenuItem(value: category.id, child: Text(categoryTitle(context, category), overflow: TextOverflow.ellipsis))).toList(),
+                        onChanged: (value) => setState(() => _categoryId = value ?? 'home'),
+                      ),
+                    ),
+                    const SizedBox(width: 9),
+                    Expanded(flex: 2, child: TextFormField(controller: _city, decoration: InputDecoration(labelText: marketText(context, 'City', 'المدينة')), validator: (value) => value == null || value.trim().isEmpty ? marketText(context, 'Enter a city.', 'أدخل المدينة.') : null)),
+                  ],
                 ),
                 const SizedBox(height: 10),
-                TextFormField(controller: _note, minLines: 2, maxLines: 3, decoration: InputDecoration(labelText: marketText(context, 'Tell us about your store (optional)', 'نبذة عن المتجر (اختياري)')),
-                ),
+                TextFormField(controller: _description, minLines: 2, maxLines: 3, decoration: InputDecoration(labelText: marketText(context, 'Store description (optional)', 'وصف المتجر (اختياري)'))),
                 if (_error != null) ...[const SizedBox(height: 8), Text(_error!, style: const TextStyle(color: Colors.red, fontSize: 12))],
+                const SizedBox(height: 9),
+                Text(marketText(context, 'You can manage the store immediately. Customers will see it after approval.', 'يمكنك إدارة المتجر فوراً، ويظهر للعملاء بعد الموافقة.'), style: const TextStyle(color: marketplaceMuted, fontSize: 10, height: 1.4)),
               ],
             ),
           ),
         ),
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(context, false), child: Text(marketText(context, 'Cancel', 'إلغاء'))),
-        FilledButton(onPressed: _submit, child: Text(marketText(context, 'Submit application', 'إرسال الطلب'))),
+        TextButton(onPressed: _busy ? null : () => Navigator.pop(context, false), child: Text(marketText(context, 'Cancel', 'إلغاء'))),
+        FilledButton(onPressed: _busy ? null : _submit, child: _busy ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2)) : Text(marketText(context, 'Create store', 'إنشاء المتجر'))),
       ],
     );
   }
 
-  String? _required(String? value) => value == null || value.trim().isEmpty
-      ? marketText(context, 'Required field', 'هذا الحقل مطلوب')
-      : null;
-
-  void _submit() {
+  Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
-    final submitted = context.read<MarketplaceProvider>().submitSellerApplication(
-          sellerName: _sellerName.text,
-          storeName: _storeName.text,
-          categoryId: _categoryId,
-          city: _city.text,
-          note: _note.text,
-        );
-    if (submitted) {
+    setState(() => _busy = true);
+    final result = await context.read<MarketplaceAuthProvider>().applyForSeller(
+      storeName: _storeName.text,
+      storeCategoryId: _categoryId,
+      storeCity: _city.text,
+      storeDescription: _description.text,
+    );
+    if (!mounted) return;
+    if (result.isSuccess) {
       Navigator.pop(context, true);
     } else {
-      setState(() => _error = marketText(context, 'A pending application already exists for this demo account.', 'يوجد طلب قيد المراجعة لهذا الحساب التجريبي.'));
+      setState(() {
+        _busy = false;
+        _error = marketText(context, 'Unable to create the seller workspace for this account.', 'تعذر إنشاء لوحة البائع لهذا الحساب.');
+      });
     }
   }
 }
@@ -758,7 +844,7 @@ class _CustomerOrderCard extends StatelessWidget {
       ),
     );
     if (confirmed != true || !context.mounted) return;
-    final cancelled = market.cancelStoreOrder(parentId, child.id);
+    final cancelled = await market.cancelStoreOrderRemote(parentId, child.id);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(cancelled ? marketText(context, 'Store sub-order cancelled.', 'تم إلغاء الطلب الفرعي.') : marketText(context, 'This order can no longer be cancelled.', 'لا يمكن إلغاء هذا الطلب الآن.'))),
     );

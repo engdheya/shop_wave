@@ -19,8 +19,12 @@ dependencies:
   sqflite_common_ffi: ^2.4.0+3
   shared_preferences: ^2.2.2
   firebase_core: ^4.9.0
+  firebase_app_check: ^0.4.2
   firebase_auth: ^6.5.1
   cloud_firestore: ^6.4.1
+  cloud_functions: ^6.4.0
+  firebase_storage: ^13.0.0
+  image_picker: ^1.1.2
 
   sqflite: any
   path: any

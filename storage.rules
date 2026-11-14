@@ -1,0 +1,38 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isApprovedOwner(storeId) {
+      let store = firestore.get(/databases/(default)/documents/stores/$(storeId));
+      return signedIn() && store.data.sellerId == request.auth.uid &&
+        store.data.sellerApproved == true &&
+        request.auth.token.seller == true &&
+        request.auth.token.sellerApproved == true;
+    }
+
+    function validImageUpload() {
+      return request.resource != null &&
+        request.resource.size > 0 &&
+        request.resource.size <= 10 * 1024 * 1024 &&
+        request.resource.contentType.matches('image/(jpeg|png|webp)');
+    }
+
+    match /stores/{storeId}/products/{fileName} {
+      allow read: if firestore.get(/databases/(default)/documents/stores/$(storeId)).data.status == 'active';
+      allow write: if isApprovedOwner(storeId) && validImageUpload();
+    }
+
+    match /stores/{storeId}/assets/{fileName} {
+      allow read: if firestore.get(/databases/(default)/documents/stores/$(storeId)).data.status == 'active';
+      allow write: if isApprovedOwner(storeId) && validImageUpload();
+    }
+
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}

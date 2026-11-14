@@ -49,6 +49,8 @@ String storeStatusTitle(BuildContext context, StoreStatus status) {
   switch (status) {
     case StoreStatus.active:
       return marketText(context, 'Open', 'مفتوح');
+    case StoreStatus.pending:
+      return marketText(context, 'Pending approval', 'بانتظار الموافقة');
     case StoreStatus.paused:
       return marketText(context, 'Paused', 'متوقف مؤقتاً');
     case StoreStatus.suspended:

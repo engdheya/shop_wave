@@ -2,64 +2,71 @@ import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
 
-/// Default [FirebaseOptions] for use with your Firebase services.
-/// This is set up with placeholders to ensure the app compiles immediately.
-/// Running `flutterfire configure` will automatically overwrite this file with your actual project keys.
+/// Firebase's client configuration is deliberately supplied by the project
+/// owner at build time. No project ID or API key is guessed or embedded here.
+/// Run `flutterfire configure` for the selected Firebase project, or provide
+/// the values in firebase.config.json using --dart-define-from-file.
 class DefaultFirebaseOptions {
+  static const _apiKey = String.fromEnvironment('FIREBASE_API_KEY');
+  static const _projectId = String.fromEnvironment('FIREBASE_PROJECT_ID');
+  static const _senderId = String.fromEnvironment('FIREBASE_MESSAGING_SENDER_ID');
+  static const _storageBucket = String.fromEnvironment('FIREBASE_STORAGE_BUCKET');
+  static const _webAppId = String.fromEnvironment('FIREBASE_WEB_APP_ID');
+  static const _androidAppId = String.fromEnvironment('FIREBASE_ANDROID_APP_ID');
+  static const _iosAppId = String.fromEnvironment('FIREBASE_IOS_APP_ID');
+  static const _authDomain = String.fromEnvironment('FIREBASE_AUTH_DOMAIN');
+  static const _iosBundleId = String.fromEnvironment('FIREBASE_IOS_BUNDLE_ID');
+
   static FirebaseOptions get currentPlatform {
+    final appId = kIsWeb
+        ? _webAppId
+        : switch (defaultTargetPlatform) {
+            TargetPlatform.android => _androidAppId,
+            TargetPlatform.iOS => _iosAppId,
+            _ => '',
+          };
+    if (_apiKey.isEmpty ||
+        _projectId.isEmpty ||
+        _senderId.isEmpty ||
+        _storageBucket.isEmpty ||
+        appId.isEmpty ||
+        (kIsWeb && _authDomain.isEmpty)) {
+      throw StateError(
+        'Firebase is not configured for this build. Configure the selected '
+        'project with flutterfire configure or provide FIREBASE_* values.',
+      );
+    }
     if (kIsWeb) {
-      return web;
+      return FirebaseOptions(
+        apiKey: _apiKey,
+        appId: appId,
+        messagingSenderId: _senderId,
+        projectId: _projectId,
+        storageBucket: _storageBucket,
+        authDomain: _authDomain.isEmpty ? null : _authDomain,
+      );
     }
-    switch (defaultTargetPlatform) {
-      case TargetPlatform.android:
-        return android;
-      case TargetPlatform.iOS:
-        return ios;
-      case TargetPlatform.macOS:
-        throw UnsupportedError(
-          'DefaultFirebaseOptions have not been configured for macos - '
-          'you can re-run the flutterfire configure command to configure for other platforms',
-        );
-      case TargetPlatform.windows:
-        throw UnsupportedError(
-          'DefaultFirebaseOptions have not been configured for windows - '
-          'you can re-run the flutterfire configure command to configure for other platforms',
-        );
-      case TargetPlatform.linux:
-        throw UnsupportedError(
-          'DefaultFirebaseOptions have not been configured for linux - '
-          'you can re-run the flutterfire configure command to configure for other platforms',
-        );
-      default:
-        throw UnsupportedError(
-          'DefaultFirebaseOptions are not supported for this platform.',
-        );
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return FirebaseOptions(
+        apiKey: _apiKey,
+        appId: appId,
+        messagingSenderId: _senderId,
+        projectId: _projectId,
+        storageBucket: _storageBucket,
+      );
     }
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return FirebaseOptions(
+        apiKey: _apiKey,
+        appId: appId,
+        messagingSenderId: _senderId,
+        projectId: _projectId,
+        storageBucket: _storageBucket,
+        iosBundleId: _iosBundleId.isEmpty ? null : _iosBundleId,
+      );
+    }
+    throw UnsupportedError(
+      'Shop Wave Firebase is configured for web, Android, and iOS only.',
+    );
   }
-
-  static const FirebaseOptions web = FirebaseOptions(
-    apiKey: 'AIzaSyAllQJe5OL6mwXfuRX8PHHVa0AD8GQpWn4',
-    appId: '1:574634640749:web:7b154c246036a76a3a4664',
-    messagingSenderId: '574634640749',
-    projectId: 'e-commerce-app-d84a1',
-    authDomain: 'e-commerce-app-d84a1.firebaseapp.com',
-    storageBucket: 'e-commerce-app-d84a1.firebasestorage.app',
-  );
-
-  static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyCTJ6-IZVhaFvWouapdEKu83ILqg_DCtQU',
-    appId: '1:574634640749:android:2eebabfb35918e823a4664',
-    messagingSenderId: '574634640749',
-    projectId: 'e-commerce-app-d84a1',
-    storageBucket: 'e-commerce-app-d84a1.firebasestorage.app',
-  );
-
-  static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'AIzaSyDummyApiKeyIosPlaceholder12345',
-    appId: '1:1234567890:ios:abcdef123456',
-    messagingSenderId: '1234567890',
-    projectId: 'shopwave-ecommerce-app',
-    storageBucket: 'shopwave-ecommerce-app.appspot.com',
-    iosBundleId: 'com.example.ecommerceAppWithProvider',
-  );
 }
