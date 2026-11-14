@@ -1,11 +1,11 @@
 {
-    "name": "e_commerce_app_with_provider",
-    "short_name": "e_commerce_app_with_provider",
+    "name": "Shop Wave — Multi-vendor Marketplace",
+    "short_name": "Shop Wave",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#F6F8F8",
+    "theme_color": "#117A72",
+    "description": "Shop Wave connects customers with independent sellers through one marketplace.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
